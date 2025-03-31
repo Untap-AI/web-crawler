@@ -1,0 +1,13 @@
+{
+  "chunk_text": "[Browse all Wines](https://www.westhillsvineyards.com/shop-all)\n",
+  "metadata": {
+    "source": "wines",
+    "file_path": "winery_content\\wines.md",
+    "timestamp": "2025-03-31 17:50:45",
+    "customer_id": "west_hills_vineyards",
+    "title": "Want to peruse our entire cellar?",
+    "chunk_id": "wines_2",
+    "chunk_index": 1,
+    "total_chunks": 2
+  }
+}

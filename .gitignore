@@ -1,7 +1,7 @@
 # Environment variables and secrets
 .env
 *.env
-.env.*
+
 
 # API keys and sensitive data
 *api_key*
