@@ -78,3 +78,10 @@ tmp/
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# Pinecone and processed content
+processed_content/
+chunked_content/
+vector_chunks/
+embeddings/
+pinecone_data/
