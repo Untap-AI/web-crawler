@@ -162,11 +162,16 @@ async def crawl(config: CrawlerConfig = None):
                         if not is_file_url(normalized_link):
                             print(f"Debug: Not a file URL: {normalized_link}")
                             if is_valid_web_url(normalized_link):
-                                print(
-                                    f"Debug: Valid web URL, adding: "
-                                    f"{normalized_link}"
-                                )
-                                unique_links.add(normalized_link)
+                                if should_exclude_path(
+                                    normalized_link, config.excluded_paths
+                                ):
+                                    print(f"Debug: Excluding path: {normalized_link}")
+                                else:
+                                    print(
+                                        f"Debug: Valid web URL, adding: "
+                                        f"{normalized_link}"
+                                    )
+                                    unique_links.add(normalized_link)
                             else:
                                 print(
                                     f"Debug: Invalid web URL, skipping: "
@@ -439,6 +444,26 @@ def normalize_url(url):
         )
     )
     return normalized
+
+
+def should_exclude_path(url, excluded_paths):
+    """
+    Check if a URL should be excluded based on excluded paths.
+
+    Args:
+        url (str): The URL to check
+        excluded_paths (List[str]): List of path patterns to exclude
+
+    Returns:
+        bool: True if URL should be excluded, False otherwise
+    """
+    if not excluded_paths:
+        return False
+
+    for excluded_path in excluded_paths:
+        if excluded_path in url:
+            return True
+    return False
 
 
 def is_file_url(url):
