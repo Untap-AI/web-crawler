@@ -68,7 +68,6 @@ class CrawlerConfig:
 
     # Summarization parameters
     summary_model_name: str = "gpt-5-nano"
-    summary_temperature: float = 0.3
     summary_max_workers: int = 10
 
     # Vector DB parameters
@@ -131,9 +130,6 @@ class CrawlerConfig:
         # Summarization parameters
         if "SUMMARY_MODEL_NAME" in os.environ:
             config.summary_model_name = os.environ["SUMMARY_MODEL_NAME"]
-
-        if "SUMMARY_TEMPERATURE" in os.environ:
-            config.summary_temperature = float(os.environ["SUMMARY_TEMPERATURE"])
 
         if "SUMMARY_MAX_TOKENS" in os.environ:
             config.summary_max_tokens = int(os.environ["SUMMARY_MAX_TOKENS"])

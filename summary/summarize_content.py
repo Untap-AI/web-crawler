@@ -50,14 +50,13 @@ def summarize_content(chunked_documents: List[Document], config=None):
 
     if config:
         model_name = getattr(config, "summary_model_name")
-        temperature = getattr(config, "summary_temperature")
         max_workers = getattr(config, "summary_max_workers")
 
     processed_results = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_chunk = {
-            executor.submit(process_chunk, chunk, model_name, temperature): chunk
+            executor.submit(process_chunk, chunk, model_name): chunk
             for chunk in chunked_documents
         }
         for future in concurrent.futures.as_completed(future_to_chunk):
@@ -71,13 +70,12 @@ def summarize_content(chunked_documents: List[Document], config=None):
     return processed_results
 
 
-def process_chunk(chunk, model_name, temperature):
+def process_chunk(chunk, model_name):
     """Process an individual chunk.
 
     Args:
         chunk: A Document object with page_content and metadata
         model_name: The OpenAI model to use
-        temperature: Temperature setting for generation
 
     Returns:
         tuple: (status, processed_chunk) where status is one of
@@ -89,7 +87,7 @@ def process_chunk(chunk, model_name, temperature):
         url = chunk.metadata.get("url", "unknown")
 
         # Process content using the API
-        keep, keywords = process_chunk_content(content, client, model_name, temperature)
+        keep, keywords = process_chunk_content(content, client, model_name)
 
         if not keep:
             print(f"Marked for deletion: chunk from {url} - no useful content")
@@ -122,7 +120,6 @@ def process_chunk_content(
     content,
     client,
     model_name,
-    temperature,
 ) -> Tuple[bool, str]:
     """Process chunk content and determine if it should be kept.
 
@@ -130,7 +127,6 @@ def process_chunk_content(
         content (str): The content to process
         client: OpenAI client instance
         model_name: Model to use for processing
-        temperature: Temperature setting for generation
 
     Returns:
         tuple: (keep_boolean, keywords) where keep_boolean is True if content
@@ -153,7 +149,7 @@ def process_chunk_content(
             input=user_prompt,
             instructions=system_prompt,
             model=model_name,
-            temperature=temperature,
+            service_tier="flex",
             text={
                 "format": {
                     "type": "json_schema",
