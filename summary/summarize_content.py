@@ -11,6 +11,7 @@ import concurrent.futures
 from typing import List, Tuple
 from openai import OpenAI
 from langchain_core.documents import Document
+from crawler.clean_markdown import remove_all_markdown_links
 
 client = OpenAI()
 
@@ -86,8 +87,11 @@ def process_chunk(chunk, model_name):
         content = chunk.page_content
         url = chunk.metadata.get("url", "unknown")
 
+        # Clean the content to remove links and images
+        cleaned_content = clean_chunk_content(content)
+
         # Process content using the API
-        keep, keywords = process_chunk_content(content, client, model_name)
+        keep, keywords = process_chunk_content(cleaned_content, client, model_name)
 
         if not keep:
             print(f"Marked for deletion: chunk from {url} - no useful content")
@@ -106,7 +110,7 @@ def process_chunk(chunk, model_name):
             # Set standard attributes expected by downstream processes
             result.url = url
             result.markdown = (
-                f"[View Source]({url})\n\n" f"Keywords: {keywords}\n\n" f"{content}"
+                f"[View Source]({url})\n\n" f"Keywords: {keywords}\n\n" f"{cleaned_content}"
             )
 
             print(f"Updated chunk from {url} with keywords")
@@ -180,3 +184,37 @@ def process_chunk_content(
     except Exception as e:
         print(f"Error processing chunk: {e}")
         return False, ""
+
+
+def clean_chunk_content(content):
+    """
+    Clean chunk content by removing markdown links and images.
+    
+    Args:
+        content (str): The chunk content to clean
+        
+    Returns:
+        str: Cleaned content with links and images removed
+    """
+    import re
+    
+    # Regular expression to identify markdown links and images
+    # This matches both [text](url) and ![alt](url) formats
+    link_pattern = re.compile(r"!?\[(.*?)\]\((.*?)\)")
+    
+    # Replace all links and images
+    # For regular links [text](url), keep the text content
+    # For images ![alt](url), remove them entirely
+    def replace_link_or_image(match):
+        full_match = match.group(0)
+        text_content = match.group(1)
+        
+        # If it's an image link (starts with !), remove it entirely
+        if full_match.startswith('!'):
+            return ""
+        # If it's a regular link, keep the text content
+        else:
+            return text_content
+    
+    cleaned_content = link_pattern.sub(replace_link_or_image, content)
+    return cleaned_content
