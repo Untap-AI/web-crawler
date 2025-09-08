@@ -176,6 +176,8 @@ def process_chunk_content(
 
         parsed_result = json.loads(response.output_text)
 
+        print(f"Parsed result: {parsed_result}")
+
         keep = parsed_result.get("keep", False)
         keywords = parsed_result.get("keywords", "")
 
