@@ -25,20 +25,20 @@ def process_markdown_results(results):
 
 def remove_all_markdown_links(results):
     """
-    Remove all markdown links from all documents, preserving only the link
-    text.
+    Remove all markdown links and images from all documents, preserving only the link
+    text for regular links and removing images entirely.
 
     Args:
         results (list): List of crawler result objects
 
     Returns:
-        list: Processed results with all links removed, only text preserved
+        list: Processed results with all links and images removed
     """
     processed_results = []
 
-    # Regular expression to identify markdown links
-    # This matches exactly [text](url) format
-    link_pattern = re.compile(r"\[(.*?)\]\((.*?)\)")
+    # Regular expression to identify markdown links and images
+    # This matches both [text](url) and ![alt](url) formats
+    link_pattern = re.compile(r"!?\[(.*?)\]\((.*?)\)")
 
     for result in results:
         # Determine which markdown content to use
@@ -60,8 +60,21 @@ def remove_all_markdown_links(results):
             processed_results.append(result)
             continue
 
-        # Replace all links with just their text content
-        modified_content = link_pattern.sub(r"\1", markdown_content)
+        # Replace all links and images
+        # For regular links [text](url), keep the text content
+        # For images ![alt](url), remove them entirely
+        def replace_link_or_image(match):
+            full_match = match.group(0)
+            text_content = match.group(1)
+            
+            # If it's an image link (starts with !), remove it entirely
+            if full_match.startswith('!'):
+                return ""
+            # If it's a regular link, keep the text content
+            else:
+                return text_content
+        
+        modified_content = link_pattern.sub(replace_link_or_image, markdown_content)
 
         # Update the markdown content (always set result.markdown)
         result.markdown = modified_content
