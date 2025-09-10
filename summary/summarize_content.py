@@ -187,7 +187,6 @@ def process_chunk_content(
         print(f"Error processing chunk: {e}")
         return False, ""
 
-
 def clean_chunk_content(content):
     """
     Clean chunk content by removing markdown links and images.
@@ -220,3 +219,4 @@ def clean_chunk_content(content):
     
     cleaned_content = link_pattern.sub(replace_link_or_image, content)
     return cleaned_content
+

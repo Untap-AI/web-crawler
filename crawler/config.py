@@ -35,7 +35,7 @@ class CrawlerConfig:
     chunk_threshold_pct: float = 20.0  # Default 20% threshold
 
     # LLM settings
-    llm_provider: str = "openai/gpt-5-nano"
+    llm_provider: str = "openai/gpt-4.1-nano"
     llm_instruction: str = """
         You are an assistant who is an expert at filtering content extracted from websites. You are given a page from a website.
         Your task is to extract ONLY substantive content that provides real value to customers visiting the website.
@@ -67,7 +67,7 @@ class CrawlerConfig:
     buffer_size: int = 3
 
     # Summarization parameters
-    summary_model_name: str = "gpt-5-nano"
+    summary_model_name: str = "gpt-4.1-nano"
     summary_max_workers: int = 10
 
     # Vector DB parameters
