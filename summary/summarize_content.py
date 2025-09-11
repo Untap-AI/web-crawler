@@ -158,7 +158,6 @@ def process_chunk_content(
             instructions=system_prompt,
             model=model_name,
             temperature=temperature,
-            service_tier="flex",
             text={
                 "format": {
                     "type": "json_schema",
