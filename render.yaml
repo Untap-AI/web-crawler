@@ -6,16 +6,10 @@ services:
     plan: standard
     env: python
     buildCommand: |
-      # Install dependencies
-      pip install -r requirements.txt
-      pip install -e .
-      
-      # Install Playwright with only Chromium
-      pip install playwright
-      
-      # Set Playwright browsers path to Render-specific directory
+      python3 -m pip install -r requirements.txt
+      python3 -m pip install -e .
       export PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/playwright
-      python -m playwright install chromium
+      python3 -m playwright install chromium
     startCommand: python orchestrator.py
     schedule: "0 9 * * *"  # Run at 9 AM UTC every 2 days
     envVars:
