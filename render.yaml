@@ -5,11 +5,7 @@ services:
     name: web-crawler
     plan: standard
     env: python
-    buildCommand: |
-      python3 -m pip install -r requirements.txt
-      python3 -m pip install -e .
-      export PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/playwright
-      python3 -m playwright install chromium
+    buildCommand: python3 -m pip install -r requirements.txt && python3 -m pip install -e . && python3 -m playwright install chromium
     startCommand: python orchestrator.py
     schedule: "0 9 * * *"  # Run at 9 AM UTC every 2 days
     envVars:
