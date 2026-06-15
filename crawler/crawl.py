@@ -68,14 +68,13 @@ async def crawl(config: CrawlerConfig = None):
         user_agent=config.user_agent,
         process_iframes=True,  # Process content within iframes
         remove_overlay_elements=True,  # Remove popups/overlays that block scrolling
-        js_code=[
-            get_progressive_scroll_js(),  # Progressive scrolling for lazy-loaded content
-            get_captcha_detection_js(),  # Detect captcha elements
-            get_ip_check_js(),  # Check IP address
+        js_code=link_js_code + [
+            get_progressive_scroll_js(),
+            get_captcha_detection_js(),
+            get_ip_check_js(),
         ],
         # Use a simpler markdown generator for link extraction
         markdown_generator=None,  # Use default simple markdown
-        js_code=link_js_code,
     )
 
     openai_config = LLMConfig(
