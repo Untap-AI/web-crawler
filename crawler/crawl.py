@@ -578,30 +578,39 @@ def get_progressive_scroll_js():
     """
     return """
     (async () => {
-        const scrollDelay = 500; // Wait 500ms between scrolls
-        const maxScrolls = 20; // Maximum number of scroll attempts
-        
+        const scrollDelay = 250; // Wait 250ms between scrolls
+        const maxScrolls = 6; // Maximum number of scroll attempts — RAG cares
+        // about a page's real (usually server-rendered) body text, not content
+        // buried behind an infinite-scroll carousel. Sites with a lazy widget
+        // that never "settles" (recommended products, reviews) used to burn
+        // the full budget here — up to 10s/page at the old 20 x 500ms ceiling.
+
         let lastHeight = document.body.scrollHeight;
         let scrollCount = 0;
-        
+        let stableReads = 0;
+
         while (scrollCount < maxScrolls) {
             // Scroll to bottom
             window.scrollTo(0, document.body.scrollHeight);
-            
+
             // Wait for content to load
             await new Promise(resolve => setTimeout(resolve, scrollDelay));
-            
+
             // Check if new content loaded
             let newHeight = document.body.scrollHeight;
             if (newHeight === lastHeight) {
-                // No new content, try a few more times to be sure
-                if (scrollCount > 2) break;
+                // No new content — stop as soon as it's stable once, rather
+                // than waiting for 3 back-to-back unchanged reads.
+                stableReads++;
+                if (stableReads >= 1) break;
+            } else {
+                stableReads = 0;
             }
-            
+
             lastHeight = newHeight;
             scrollCount++;
         }
-        
+
         // Scroll back to top for complete capture
         window.scrollTo(0, 0);
         await new Promise(resolve => setTimeout(resolve, 200));
