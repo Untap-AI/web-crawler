@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 from typing import List
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+# override=False: fill in anything not already set in the environment, but
+# never clobber vars a caller (e.g. demo-setup's per-company subprocess env)
+# explicitly set. override=True previously let a stale .env value silently
+# replace the real per-invocation START_URLS/MAX_DEPTH/HEADLESS.
+load_dotenv(override=False)
 
 
 @dataclass
