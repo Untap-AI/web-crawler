@@ -39,7 +39,9 @@ async def crawl(config: CrawlerConfig = None):
         sys.setrecursionlimit(10000)
 
     deep_crawl = BFSDeepCrawlStrategy(
-        max_depth=config.max_depth, include_external=config.include_external
+        max_depth=config.max_depth,
+        max_pages=config.max_pages,
+        include_external=config.include_external,
     )
 
     crawler_link_config = CrawlerRunConfig(
