@@ -23,6 +23,9 @@ class CrawlerConfig:
     # Crawling parameters
     start_urls: List[str] = field(default_factory=list)
     max_depth: int = 3
+    # Hard ceiling on pages visited by the deep crawl. max_depth alone is not a
+    # bound — depth 1 on a site with a 400-link footer is a 400-page crawl.
+    max_pages: int = 100
     batch_size: int = 10
     include_external: bool = False
 
@@ -36,6 +39,10 @@ class CrawlerConfig:
     # Extra wait (seconds) on the first/root fetch so JS anti-bot challenges
     # (e.g. SiteGround's "Robot Challenge Screen") can resolve and reload.
     challenge_wait: int = 12
+    # Wait (seconds) on subsequent pages in the shallow demo scrape. The anti-bot
+    # challenge only fires on first load, and these are fetched concurrently, so
+    # they need far less than the root.
+    subpage_wait: int = 1
 
     # Validation parameters
     expected_chunks: int = 0  # 0 means no validation
@@ -76,7 +83,9 @@ class CrawlerConfig:
     # Summarization parameters
     summary_model_name: str = "gpt-4.1-nano"
     summary_temperature: float = 0.3
-    summary_max_workers: int = 10
+    # gpt-4.1-nano, I/O-bound. At depth 1 x 100 pages this is ~500 calls, and
+    # 10-wide made summarization the second-biggest chunk of wall clock.
+    summary_max_workers: int = 24
 
     # Vector DB parameters
     chunk_id_prefix: str = "web_crawl"
@@ -134,6 +143,12 @@ class CrawlerConfig:
         # Process numeric values
         if "MAX_DEPTH" in os.environ:
             config.max_depth = int(os.environ["MAX_DEPTH"])
+
+        if "MAX_PAGES" in os.environ:
+            config.max_pages = int(os.environ["MAX_PAGES"])
+
+        if "SUBPAGE_WAIT" in os.environ:
+            config.subpage_wait = int(os.environ["SUBPAGE_WAIT"])
 
         if "BATCH_SIZE" in os.environ:
             config.batch_size = int(os.environ["BATCH_SIZE"])
