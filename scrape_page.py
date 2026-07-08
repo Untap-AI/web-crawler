@@ -68,6 +68,9 @@ def _build_browser_config(config: CrawlerConfig) -> BrowserConfig:
         text_mode=config.text_mode,
         ignore_https_errors=config.ignore_https_errors,
         user_agent=config.user_agent,
+        # crawl4ai prints its own init banner straight to stdout when verbose,
+        # which would corrupt the pure-JSON contract this script promises.
+        verbose=False,
     )
     # Same fix as crawl.py: clear chrome_channel so Playwright uses managed
     # chromium instead of falling back to a system Chrome lookup.
