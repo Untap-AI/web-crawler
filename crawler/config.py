@@ -26,7 +26,10 @@ class CrawlerConfig:
     # Hard ceiling on pages visited by the deep crawl. max_depth alone is not a
     # bound — depth 1 on a site with a 400-link footer is a 400-page crawl.
     max_pages: int = 100
-    batch_size: int = 10
+    # Concurrent subpage fetches within one shared browser (all batches reuse
+    # the same AsyncWebCrawler). Bottleneck per page is mostly LLM/network
+    # wait, not local CPU, so this can run higher than it looks.
+    batch_size: int = 15
     include_external: bool = False
 
     # Content filtering

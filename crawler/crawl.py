@@ -88,7 +88,12 @@ async def crawl(config: CrawlerConfig = None):
         exclude_social_media_links=True,
         exclude_external_images=True,
         verbose=config.verbose,
-        delay_before_return_html=config.delay_before_return_html,
+        # These are subpages, not the root — the anti-bot challenge (if any)
+        # already cleared during the link-collection fetch above, which used
+        # config.challenge_wait. Paying that same wait again on every one of
+        # up to max_pages subpages is dead weight (mirrors the fix already
+        # applied to the shallow scrape in scrape_page.py).
+        delay_before_return_html=config.subpage_wait,
         magic=config.magic,
         simulate_user=config.simulate_user,
         override_navigator=config.override_navigator,
@@ -112,7 +117,7 @@ async def crawl(config: CrawlerConfig = None):
         exclude_social_media_links=True,
         exclude_external_images=True,
         verbose=config.verbose,
-        delay_before_return_html=config.delay_before_return_html,
+        delay_before_return_html=config.subpage_wait,
         magic=config.magic,
         simulate_user=config.simulate_user,
         override_navigator=config.override_navigator,
@@ -419,50 +424,51 @@ def check_captcha_indicators(result, url):
         return
     
     html_lower = html.lower()
-    captcha_indicators = [
-        "captcha",
-        "recaptcha",
-        "hcaptcha",
+
+    # A page that merely *references* a captcha library is not blocked. Modern
+    # stacks (Shopify, WordPress) load invisible reCAPTCHA v3 on every page to
+    # protect their forms, so "recaptcha"/"hcaptcha"/"captcha" appear in a
+    # <script> tag on a perfectly readable 200-OK page. Warning on those buries
+    # real blocks under hundreds of false positives (Bend Soap: 562 warnings, 0
+    # actual blocks). We only warn on a real block *symptom*:
+    #
+    #   1. a challenge-wall phrase — copy that only renders when the page IS the
+    #      interstitial, never as an incidental script reference, or
+    #   2. a blocking HTTP status (403/429/503), or
+    #   3. a suspiciously empty body on a 200 (the classic stripped block page).
+    block_phrases = [
         "verify you are human",
-        "challenge",
-        "cloudflare",
         "checking your browser",
         "just a moment",
         "ddos protection",
         "access denied",
+        "attention required",  # Cloudflare block-page title
     ]
-    
-    found_indicators = [ind for ind in captcha_indicators if ind in html_lower]
-    
-    if found_indicators:
-        print(f"\n🚨 CAPTCHA WARNING for {url}:")
+    found_phrases = [p for p in block_phrases if p in html_lower]
+    is_error_status = status_code in (403, 429, 503)
+    is_tiny = len(html) < 5000 and status_code == 200
+
+    if found_phrases or is_error_status or is_tiny:
+        print(f"\n🚨 CAPTCHA/BLOCK WARNING for {url}:")
         print(f"   Status code: {status_code}")
-        print(f"   Found indicators: {', '.join(found_indicators)}")
+        if found_phrases:
+            print(f"   Challenge phrases: {', '.join(found_phrases)}")
         print(f"   HTML length: {len(html)} bytes")
-        
-        # Check for specific captcha elements
+
         if "recaptcha" in html_lower:
-            print(f"   ⚠️  reCAPTCHA detected!")
+            print(f"   ⚠️  reCAPTCHA present on page")
         if "hcaptcha" in html_lower:
-            print(f"   ⚠️  hCaptcha detected!")
+            print(f"   ⚠️  hCaptcha present on page")
         if "cloudflare" in html_lower:
             print(f"   ⚠️  Cloudflare protection detected!")
-        
-        # Show preview of HTML
+        if is_tiny:
+            print(f"   ⚠️  Body suspiciously small — likely a stripped block page")
+
         preview = html[:500].replace('\n', ' ').strip()
         print(f"   HTML preview: {preview}...")
         print()
-    
-    # Check if content seems suspiciously small (might be blocked)
-    if len(html) < 5000 and status_code == 200:
-        print(f"⚠️  SUSPICIOUSLY SMALL HTML for {url}:")
-        print(f"   Status: {status_code}, HTML length: {len(html)} bytes")
-        print(f"   This might indicate content blocking or captcha page")
-        preview = html[:500].replace('\n', ' ').strip()
-        print(f"   Preview: {preview}...")
-        print()
-    
-    # Check for error status codes that might indicate blocking
+
+    # Explain the specific error status when one of the blocking codes fired.
     if status_code in [403, 429, 503]:
         print(f"⚠️  HTTP ERROR for {url}:")
         print(f"   Status code: {status_code}")
@@ -572,30 +578,39 @@ def get_progressive_scroll_js():
     """
     return """
     (async () => {
-        const scrollDelay = 500; // Wait 500ms between scrolls
-        const maxScrolls = 20; // Maximum number of scroll attempts
-        
+        const scrollDelay = 250; // Wait 250ms between scrolls
+        const maxScrolls = 6; // Maximum number of scroll attempts — RAG cares
+        // about a page's real (usually server-rendered) body text, not content
+        // buried behind an infinite-scroll carousel. Sites with a lazy widget
+        // that never "settles" (recommended products, reviews) used to burn
+        // the full budget here — up to 10s/page at the old 20 x 500ms ceiling.
+
         let lastHeight = document.body.scrollHeight;
         let scrollCount = 0;
-        
+        let stableReads = 0;
+
         while (scrollCount < maxScrolls) {
             // Scroll to bottom
             window.scrollTo(0, document.body.scrollHeight);
-            
+
             // Wait for content to load
             await new Promise(resolve => setTimeout(resolve, scrollDelay));
-            
+
             // Check if new content loaded
             let newHeight = document.body.scrollHeight;
             if (newHeight === lastHeight) {
-                // No new content, try a few more times to be sure
-                if (scrollCount > 2) break;
+                // No new content — stop as soon as it's stable once, rather
+                // than waiting for 3 back-to-back unchanged reads.
+                stableReads++;
+                if (stableReads >= 1) break;
+            } else {
+                stableReads = 0;
             }
-            
+
             lastHeight = newHeight;
             scrollCount++;
         }
-        
+
         // Scroll back to top for complete capture
         window.scrollTo(0, 0);
         await new Promise(resolve => setTimeout(resolve, 200));
