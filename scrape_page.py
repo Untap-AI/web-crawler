@@ -36,7 +36,8 @@ import asyncio
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
 
 from PIL import Image
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
@@ -245,6 +246,63 @@ def _extract_logo_candidates(result) -> list:
     return []
 
 
+# The manifest's icons are brand-owned and usually high-res. brand_probe.js
+# can't read them (it's synchronous and they live behind a JSON fetch), so it
+# hands us the URL instead.
+MANIFEST_TIMEOUT_SECONDS = 5
+MANIFEST_MAX_ICONS = 2
+
+
+def _icon_pixels(icon: dict) -> int:
+    """Largest declared size, e.g. "48x48 96x96" -> 9216. 'any' (vector) wins."""
+    sizes = str(icon.get("sizes") or "")
+    if "any" in sizes.lower():
+        return 10**9
+    best = 0
+    for token in sizes.split():
+        match = re.fullmatch(r"(\d+)x(\d+)", token.strip(), flags=re.IGNORECASE)
+        if match:
+            best = max(best, int(match.group(1)) * int(match.group(2)))
+    return best
+
+
+def _manifest_logo_candidates(manifest_href: str, start_url: str) -> list:
+    """Fetch the web app manifest and return its largest icons as candidates.
+    Best-effort: any failure just yields nothing."""
+    if not manifest_href:
+        return []
+    try:
+        request = Request(
+            manifest_href, headers={"User-Agent": CrawlerConfig().user_agent}
+        )
+        with urlopen(request, timeout=MANIFEST_TIMEOUT_SECONDS) as response:
+            manifest = json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception as error:  # noqa: BLE001 - a missing manifest isn't fatal
+        log(f"Manifest fetch failed ({manifest_href}): {error}")
+        return []
+
+    icons = manifest.get("icons")
+    if not isinstance(icons, list):
+        return []
+
+    usable = [icon for icon in icons if isinstance(icon, dict) and icon.get("src")]
+    usable.sort(key=_icon_pixels, reverse=True)
+    candidates = []
+    for icon in usable[:MANIFEST_MAX_ICONS]:
+        candidates.append(
+            {
+                "url": urljoin(manifest_href, str(icon["src"])),
+                "kind": "manifest",
+                "sourceClass": "structured",
+                "area": 0,
+                "score": 9,
+            }
+        )
+    if candidates:
+        log(f"Manifest contributed {len(candidates)} logo candidate(s)")
+    return candidates
+
+
 def _group_logo_candidates(candidates_by_page: list, start_url: str) -> dict:
     """The defining property of a logo, independent of any markup convention:
     it's the one image that appears in the same spot on every page, while hero
@@ -315,13 +373,21 @@ def _normalize_img_key(url: str) -> str:
     return "img:" + re.sub(r"~mv2.*$", "", base, flags=re.IGNORECASE).lower()
 
 
+# Per-family slots in the final candidate pool handed to vision. Scores across
+# families aren't commensurable — a recurrence group scores page_count * 100
+# (820 on an 8-page scrape) while a real header mark scores ~200 on geometry —
+# so a global sort lets one family evict all others. That is precisely how
+# apple.com's logo lost its slot to eight "recurring" nav glyphs. Quota instead;
+# vision does the discriminating by looking at the rendered candidates.
+LOGO_POOL_QUOTA = (("structured", 5), ("dom", 5), ("recurrence", 3))
+
+
 def _apply_logo_recurrence(
     brand: dict, candidates_by_page: list, start_url: str, page_count: int
 ) -> None:
-    """Cross-check brand_probe.js's homepage candidates (which carry real
-    position data, needed for vision-bbox matching) against multi-page
-    recurrence, and fold in any recurring candidate the homepage probe missed
-    entirely — without discarding position data on the ones it did find."""
+    """Cross-check brand_probe.js's homepage candidates against multi-page
+    recurrence, fold in any recurring candidate the homepage probe missed
+    entirely, then quota the pool by signal family."""
     groups = _group_logo_candidates(candidates_by_page, start_url)
     logos = brand.get("logos") or []
 
@@ -337,13 +403,19 @@ def _apply_logo_recurrence(
             logo["score"] = logo.get("score", 0) + recurring_pages * 30
             logo["recurringPages"] = recurring_pages
 
+    # Recurrence groups whose URL already appears in the pool are the same asset
+    # seen a second way — annotate the existing entry rather than duplicating it.
+    existing_urls = {logo["url"] for logo in logos}
     for key, group in groups.items():
         if key in matched_keys or len(group["pages"]) < LOGO_MIN_RECURRING_PAGES:
+            continue
+        if group["url"] in existing_urls:
             continue
         logos.append(
             {
                 "url": group["url"],
                 "kind": group["kind"],
+                "sourceClass": "recurrence",
                 "score": _logo_recurrence_score(group),
                 "recurringPages": len(group["pages"]),
                 "rect": group["rect"],
@@ -355,7 +427,20 @@ def _apply_logo_recurrence(
             f"Logo recurrence: checked against {page_count} pages scraped, "
             f"{sum(1 for l in logos if l.get('recurringPages'))} candidate(s) recur"
         )
-    brand["logos"] = sorted(logos, key=lambda l: l.get("score", 0), reverse=True)[:10]
+
+    ranked = sorted(logos, key=lambda l: l.get("score", 0), reverse=True)
+    pool = []
+    for source_class, limit in LOGO_POOL_QUOTA:
+        taken = [l for l in ranked if l.get("sourceClass", "dom") == source_class]
+        pool.extend(taken[:limit])
+    log(
+        "Logo pool: "
+        + ", ".join(
+            f"{source_class}={sum(1 for l in pool if l.get('sourceClass', 'dom') == source_class)}"
+            for source_class, _ in LOGO_POOL_QUOTA
+        )
+    )
+    brand["logos"] = pool
 
 
 def _saturation_lightness(r: int, g: int, b: int) -> tuple:
@@ -610,11 +695,18 @@ async def scrape(start_url: str, max_pages: int) -> dict:
                     for candidate in page.get("logoCandidates") or []
                 )
 
+        # Publisher-declared icons the synchronous probe couldn't fetch itself.
+        manifest_logos = _manifest_logo_candidates(
+            brand.get("manifestHref") or "", start_url
+        )
+        if manifest_logos:
+            brand["logos"] = (brand.get("logos") or []) + manifest_logos
+
         # Dedicated logo hunt: cross-check the homepage probe's position-aware
         # candidates against multi-page recurrence (the image/wordmark that
         # repeats across distinct pages in a consistent spot is almost certainly
-        # the logo, regardless of markup convention), without discarding the
-        # position data a vision-bbox match needs downstream.
+        # the logo, regardless of markup convention), then quota the pool so no
+        # single signal family can evict the others.
         _apply_logo_recurrence(brand, logo_candidates_by_page, start_url, len(pages))
         brand["pixelDominantColors"] = state.get("pixelColors") or []
 
