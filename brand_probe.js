@@ -321,6 +321,22 @@
    * `currentSrc` resolves srcset and lazy-loaded images, which reading `src`
    * misses. Inline <svg> logos (Stripe, Vercel, most modern sites) have no URL
    * at all, so serialize them to a data: URI — the widget renders that fine. */
+  /* Which signal family each candidate kind comes from. Publisher-declared
+   * images ('structured') are collected and quota'd separately from things we
+   * inferred by walking the DOM, because the two can't be ranked against each
+   * other by score — see the quota at the end of the logos block. */
+  const SOURCE_CLASS = {
+    'ld+json': 'structured',
+    og: 'structured',
+    twitter: 'structured',
+    tile: 'structured',
+    manifest: 'structured',
+    'apple-touch-icon': 'structured',
+    favicon: 'structured',
+    img: 'dom',
+    svg: 'dom'
+  }
+
   const HEADER_PARTS = [
     'header',
     'nav',
@@ -428,13 +444,24 @@
 
   /* Authoritative when present: schema.org Organization.logo. Wix, Shopify and
    * most CMSs emit it, and it survives hashed filenames that name-scoring can't
-   * read. */
+   * read. `image` is only taken off an Organization-ish node — on a Product or
+   * Article node it's a product shot or article hero, not the brand's logo. */
+  const ORGANIZATION_TYPES =
+    /^(Organization|Corporation|LocalBusiness|OnlineBusiness|NewsMediaOrganization|EducationalOrganization|GovernmentOrganization|NGO|PerformingGroup|SportsOrganization|Restaurant|Store|Brand|WebSite)$/i
+  const isOrganizationNode = node => {
+    const type = node['@type']
+    const types = Array.isArray(type) ? type : [type]
+    return types.some(t => typeof t === 'string' && ORGANIZATION_TYPES.test(t))
+  }
+
   const structuredLogos = () => {
     const found = []
     const visit = node => {
       if (!node || typeof node !== 'object') return
       if (Array.isArray(node)) return node.forEach(visit)
-      for (const key of ['logo', 'logoUrl', 'image']) {
+      const organization = isOrganizationNode(node)
+      const keys = organization ? ['logo', 'logoUrl', 'image'] : ['logo', 'logoUrl']
+      for (const key of keys) {
         const value = node[key]
         const url = typeof value === 'string' ? value : value?.url
         if (typeof url === 'string' && /^https?:/.test(url)) {
@@ -594,11 +621,31 @@
       candidates.push({ url, kind: 'ld+json', area: 0, score: weight })
     }
 
-    const meta = document.querySelector(
-      'meta[property="og:image"], meta[name="twitter:image"]'
-    )
-    const ogImage = meta?.getAttribute('content')
-    if (ogImage) candidates.push({ url: ogImage, kind: 'og', area: 0, score: 5 })
+    /* Publisher-declared images. og:image is frequently a hero/marketing shot
+     * rather than a mark, so it cannot be trusted outright — but it's often the
+     * *only* clean signal on sites whose header logo is an inline SVG glyph
+     * (apple.com serves its real mark here as open_graph_logo.png). Emit it as
+     * a candidate and let the vision step decide by looking at it. */
+    const ogImage = document
+      .querySelector('meta[property="og:image"], meta[name="og:image"]')
+      ?.getAttribute('content')
+    if (ogImage) {
+      candidates.push({ url: resolveUrl(ogImage, location.href), kind: 'og', area: 0, score: 5 })
+    }
+    const twitterImage = document
+      .querySelector('meta[name="twitter:image"], meta[property="twitter:image"]')
+      ?.getAttribute('content')
+    if (twitterImage) {
+      candidates.push({ url: resolveUrl(twitterImage, location.href), kind: 'twitter', area: 0, score: 4 })
+    }
+
+    /* Windows tile image — brand-owned, usually the mark on a solid tile. */
+    const tileImage = document
+      .querySelector('meta[name="msapplication-TileImage"]')
+      ?.getAttribute('content')
+    if (tileImage) {
+      candidates.push({ url: resolveUrl(tileImage, location.href), kind: 'tile', area: 0, score: 7 })
+    }
 
     /* Always present, rarely the best *display* logo (too low-res), but a
      * strong signal for color specifically — favicons are commonly simplified
@@ -619,10 +666,22 @@
     }
 
     const seen = new Set()
-    return candidates
+    const deduped = candidates
       .sort((a, b) => b.score - a.score)
       .filter(c => !seen.has(c.url) && seen.add(c.url))
-      .slice(0, 10)
+      .map(c => ({ ...c, sourceClass: SOURCE_CLASS[c.kind] || 'dom' }))
+
+    /* Quota by source class rather than taking the global top-N by score.
+     * Scores from different signal families aren't commensurable — a
+     * publisher-declared logo scores 120 while a header <svg> scores 320, and
+     * neither number means the same thing. Score-sorting therefore lets one
+     * noisy family evict every other, which is exactly how apple.com's real
+     * mark got pushed out by nav-glyph candidates. Guarantee slots per family
+     * instead; the vision step downstream does the actual discriminating by
+     * looking at the images. */
+    const take = (sourceClass, limit) =>
+      deduped.filter(c => c.sourceClass === sourceClass).slice(0, limit)
+    return [...take('structured', 5), ...take('dom', 7)]
   })
 
   const title = safe(() => {
@@ -632,12 +691,23 @@
     return (siteName || document.title || '').trim().slice(0, 120) || null
   })
 
+  /* The manifest's icons are brand-owned and high-res, but reading them means
+   * fetching and parsing JSON — this probe is synchronous, so hand the URL to
+   * the Python side and let it resolve the icons into extra candidates. */
+  const manifestHref = safe(() => {
+    const href = document
+      .querySelector('link[rel="manifest"]')
+      ?.getAttribute('href')
+    return href ? resolveUrl(href, location.href) : null
+  })
+
   return {
     cssVariables: cssVariables || [],
     computedColors: computedColors || [],
     themeColor: themeColor || null,
     fonts: fonts || { body: null, heading: null },
     logos: logos || [],
+    manifestHref: manifestHref || null,
     title: title || null
   }
 })()
