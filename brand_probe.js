@@ -411,6 +411,21 @@
     }
   }
 
+  /* The wrapping anchor's accessible name often carries the brand even when the
+   * image itself is anonymous — apple.com's mark is an unlabeled <svg> inside
+   * <a aria-label="Apple">. Surfaced on each candidate so the vision selection
+   * step can show it as context, not used for scoring here. */
+  const anchorLabelOf = el => {
+    const anchor = el.closest('a[href]')
+    if (!anchor) return null
+    const label = (
+      anchor.getAttribute('aria-label') ||
+      anchor.getAttribute('title') ||
+      ''
+    ).trim()
+    return label ? label.slice(0, 80) : null
+  }
+
   /* Authoritative when present: schema.org Organization.logo. Wix, Shopify and
    * most CMSs emit it, and it survives hashed filenames that name-scoring can't
    * read. */
@@ -453,16 +468,19 @@
       return n
     }
 
-    /* Logos come in two common shapes: wide wordmarks (1:1 to 8:1) and round
-     * seals/emblems (a winery/farm/brewery crest, roughly square or circular —
-     * width:height near 1:1). Reward both; punish anything approaching hero
-     * dimensions regardless of shape. */
+    /* Logos come in three common shapes: wide wordmarks (1:1 to 8:1), round
+     * seals/emblems (roughly square), and narrow pictorial glyphs (Apple's
+     * 14x44 mark). Reward all of them; punish anything approaching hero
+     * dimensions regardless of shape. This score only pre-ranks which
+     * candidates ride along to the vision selection step — it decides nothing
+     * on its own. */
     const geometryScore = rect => {
       const area = rect.width * rect.height
       const ratio = rect.width / Math.max(rect.height, 1)
       let n = 0
       if (ratio >= 1 && ratio <= 8) n += 30 // wordmark proportions
       else if (ratio >= 0.6 && ratio < 1) n += 25 // seal/emblem proportions
+      else if (ratio >= 0.2 && ratio < 0.6) n += 15 // narrow glyph mark
       if (rect.height <= 140) n += 25
       if (area > MAX_LOGO_AREA) n -= 50 + Math.min(100, area / 20000)
       return n
@@ -479,13 +497,15 @@
 
     // NOT scoped to header/nav and not cut off after the first screenful — a
     // centered hero emblem (common for wineries, farms, boutique brands) can
-    // sit well below the fold on a tall homepage. Position is still recorded
-    // so a caller can do vision-bbox matching; it just isn't a hard filter
-    // here, since restricting it is exactly what causes misses like this.
+    // sit well below the fold on a tall homepage. Position is recorded as
+    // context, not used as a hard filter here, since restricting it is
+    // exactly what causes misses like this.
+    // A 12px floor, not 16 — small-but-real marks exist, and anything smaller
+    // genuinely can't be a displayable logo.
     for (const img of [...document.querySelectorAll('img')].slice(0, 400)) {
       if (isOurWidget(img)) continue
       const rect = img.getBoundingClientRect()
-      if (rect.width < 16 || rect.height < 16) continue
+      if (rect.width < 12 || rect.height < 12) continue
       const src = img.currentSrc || img.src
       if (!src || src.startsWith('data:')) continue
       const inHeader = Boolean(img.closest(HEADER_SELECTOR))
@@ -498,22 +518,26 @@
         img.parentElement?.className
       )
       const area = rect.width * rect.height
-      // Deliberately lenient: this pool feeds vision-bbox matching, which does
-      // the real discriminating by *looking at the picture*. Only hard-exclude
+      // Deliberately lenient: this pool feeds vision selection, which does the
+      // real discriminating by *looking at the picture*. Only hard-exclude
       // what's unambiguous — an unnamed, non-header image below a generous
       // hero-region cutoff, or anything at true hero-photo scale regardless of
-      // position. Everything else rides through for vision to judge; geometry
-      // only shapes its `score` (used for text-fallback ranking, not inclusion).
+      // position. Everything else rides through for vision to judge; `score`
+      // only pre-ranks which candidates make the pool cap.
       if (area > HERO_AREA_CUTOFF) continue
       if (!inHeader && named <= 0 && rect.top > 900) continue
+      const homeLink = linksHome(img)
       candidates.push({
         url: src,
         kind: 'img',
         rect: rectOf(rect),
         area: Math.round(area),
+        alt: (img.alt || '').trim().slice(0, 80) || null,
+        anchorLabel: anchorLabelOf(img),
+        linksHome: homeLink,
         score: Math.round(
           (inHeader ? 80 : 0) +
-            (linksHome(img) ? 70 : 0) +
+            (homeLink ? 70 : 0) +
             named +
             geometryScore(rect) -
             rect.top / 80 -
@@ -522,11 +546,14 @@
       })
     }
 
+    // Same 12px floor as imgs. The old 24px width floor silently dropped
+    // apple.com's real mark — a 14x44 <svg> in the nav — before selection ever
+    // saw it, which is how a nav-label glyph got shipped as the logo.
     for (const svg of [...document.querySelectorAll('svg')].slice(0, 60)) {
       if (isOurWidget(svg)) continue
       if (svg.querySelector('svg')) continue // nested match means we grabbed a container
       const rect = svg.getBoundingClientRect()
-      if (rect.width < 24 || rect.height < 12) continue
+      if (rect.width < 12 || rect.height < 12) continue
       if (!isLogoLikeSvg(svg)) continue
       const inHeader = Boolean(svg.closest(HEADER_SELECTOR))
       const named = svgNameScore(svg)
@@ -538,15 +565,24 @@
       if (svg.outerHTML.length > MAX_SVG_BYTES) continue
       const url = svgToDataUri(svg)
       if (url.length > MAX_SVG_BYTES * 2) continue
+      const homeLink = linksHome(svg)
+      const label = (
+        svg.getAttribute('aria-label') ||
+        svg.querySelector('title')?.textContent ||
+        ''
+      ).trim()
       candidates.push({
         url,
         kind: 'svg',
         rect: rectOf(rect),
         area: Math.round(rect.width * rect.height),
+        alt: label.slice(0, 80) || null,
+        anchorLabel: anchorLabelOf(svg),
+        linksHome: homeLink,
         score: Math.round(
           (inHeader ? 90 : 40) +
             named +
-            (linksHome(svg) ? 70 : 0) +
+            (homeLink ? 70 : 0) +
             shapeScore -
             rect.top / 80 -
             rect.left / 40
