@@ -14,6 +14,13 @@ from summary import summarize_content
 from vectordb.upload import upload_chunks
 from crawler.config import CrawlerConfig
 
+# A piped (non-tty) stdout is block-buffered by default — plain print()
+# calls throughout this codebase could sit unflushed for 10+ minutes during
+# a slow crawl, hiding real progress from whatever spawned this process
+# (demo-setup pipes stdout straight into its own logger).
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Create logs directory if it doesn't exist
 Path("logs").mkdir(exist_ok=True)
 

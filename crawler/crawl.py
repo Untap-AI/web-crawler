@@ -76,6 +76,14 @@ async def crawl(config: CrawlerConfig = None):
     content_filter = LLMContentFilter(
         llm_config=openai_config,
         instruction=config.llm_instruction,
+        # Without these, LLMContentFilter defaults to chunk_token_threshold=1e9
+        # (the whole page sent as one prompt) and no per-call timeout — a
+        # single slow/rate-limited response then blocks the entire batch with
+        # no way out, since filter_content() runs synchronously inside
+        # crawl4ai's async pipeline (see crawl_url below).
+        chunk_token_threshold=config.chunk_token_threshold,
+        overlap_rate=config.overlap_rate,
+        extra_args={"timeout": config.llm_timeout},
         verbose=config.verbose,
     )
 
@@ -248,9 +256,18 @@ async def crawl(config: CrawlerConfig = None):
                 print(f"Error crawling {url}: {e}")
                 return []
 
-        # Process URLs in batches
+        # Process URLs in batches. unique_links is every internal link found
+        # across all pages visited in the link-discovery phase above — on a
+        # site with a large nav/footer this can be far larger than max_pages,
+        # even though that phase itself was correctly bounded to max_pages.
+        # Cap here too so content-fetch work stays within the same budget.
         batch_size = config.batch_size
-        url_list = list(unique_links)
+        url_list = list(unique_links)[: config.max_pages]
+        if len(unique_links) > config.max_pages:
+            print(
+                f"Capping content crawl to {config.max_pages} of "
+                f"{len(unique_links)} unique links found (MAX_PAGES)"
+            )
         total_batches = (len(url_list) + batch_size - 1) // batch_size
 
         print(f"Processing URLs in {total_batches} batches of {batch_size}")

@@ -78,6 +78,9 @@ class CrawlerConfig:
     """
     chunk_token_threshold: int = 400
     overlap_rate: float = 0.2
+    # Per-request ceiling (seconds) on the content-filter LLM call. Passed
+    # through to litellm.completion via LLMContentFilter's extra_args.
+    llm_timeout: int = 30
 
     # Chunking parameters
     embedding_model_name: str = "text-embedding-3-small"
@@ -245,6 +248,9 @@ class CrawlerConfig:
 
         if "LLM_INSTRUCTION" in os.environ:
             config.llm_instruction = os.environ["LLM_INSTRUCTION"]
+
+        if "LLM_TIMEOUT" in os.environ:
+            config.llm_timeout = int(os.environ["LLM_TIMEOUT"])
 
         if "EXCLUDE_HIDDEN_ELEMENTS" in os.environ:
             config.exclude_hidden_elements = os.environ[
