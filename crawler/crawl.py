@@ -796,22 +796,42 @@ def should_exclude_path(url, excluded_paths):
     return False
 
 
+# Extensions that are genuinely downloadable assets rather than crawlable pages.
+# Anything else is followed — crucially including .html/.php/.aspx, which ARE
+# pages. Treating every dotted path as a file meant a site whose links end in
+# .html (e.g. /dinner/index.html) had its entire link graph discarded and only
+# the start URL was ever indexed.
+NON_PAGE_EXTENSIONS = frozenset(
+    [
+        # images
+        "jpg", "jpeg", "png", "gif", "svg", "webp", "ico", "bmp", "tiff", "avif",
+        # documents
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv",
+        # archives / binaries
+        "zip", "gz", "tar", "rar", "7z", "dmg", "exe", "pkg",
+        # media
+        "mp3", "mp4", "avi", "mov", "wmv", "webm", "wav", "ogg", "m4a",
+        # assets / feeds
+        "css", "js", "json", "xml", "rss", "woff", "woff2", "ttf", "eot",
+    ]
+)
+
+
 def is_file_url(url):
-    """Check if a URL points to a file (has a file extension).
+    """Check if a URL points to a non-page asset that shouldn't be crawled.
 
     Args:
         url (str): The URL to check
 
     Returns:
-        bool: True if the URL points to a file, False otherwise
+        bool: True if the URL points to a downloadable asset, False if it's a
+              page worth crawling (including extensionless and .html URLs).
     """
-    # Parse the URL and extract the path
-    parsed_url = urlparse(url)
-    path = parsed_url.path.lower()
+    path = urlparse(url).path.lower()
+    if "." not in path:
+        return False
 
-    # Check if the path contains a dot followed by letters/numbers
-    # This indicates a file extension
-    return "." in path and any(c.isalnum() for c in path.split(".")[-1])
+    return path.rpartition(".")[2] in NON_PAGE_EXTENSIONS
 
 
 def is_valid_web_url(url):
