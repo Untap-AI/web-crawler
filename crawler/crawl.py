@@ -52,6 +52,85 @@ def _proxy_url(config):
     return f"{scheme}://{rest}"
 
 
+# Resource types worth blocking on a text-only crawl. Images/media are the bulk
+# of a rendered ecommerce page's bytes; fonts are pure decoration for our
+# purposes. Stylesheets/scripts are kept — some sites need JS to render content
+# and to clear the anti-bot challenge.
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+
+
+class _BandwidthTracker:
+    """Accumulates approximate over-the-wire bytes so a crawl can report what it
+    will cost on a per-GB residential proxy. Counts Content-Length on responses
+    that were actually fetched; blocked requests never produce a response, so
+    they correctly contribute zero."""
+
+    def __init__(self):
+        self.total_bytes = 0
+        self.blocked_requests = 0
+
+    def make_context_hook(self, block_media):
+        async def on_page_context_created(context, page=None, **kwargs):
+            if block_media:
+                async def _route(route):
+                    try:
+                        if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
+                            self.blocked_requests += 1
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    except Exception:
+                        # Never let a routing error abort the whole page.
+                        try:
+                            await route.continue_()
+                        except Exception:
+                            pass
+
+                await context.route("**/*", _route)
+
+            def _on_response(response):
+                try:
+                    cl = response.headers.get("content-length")
+                    if cl and cl.isdigit():
+                        self.total_bytes += int(cl)
+                except Exception:
+                    pass
+
+            if page is not None:
+                page.on("response", _on_response)
+
+        return on_page_context_created
+
+    def report(self, page_count):
+        """Print a bandwidth + projected-cost summary for the run."""
+        mb = self.total_bytes / (1024 * 1024)
+        print("\n📊 Bandwidth this crawl:")
+        print(
+            f"   {mb:.1f} MB across {page_count} page(s)"
+            + (f", {self.blocked_requests} image/media/font requests blocked"
+               if self.blocked_requests else "")
+        )
+        if page_count > 0:
+            per_page_kb = (self.total_bytes / page_count) / 1024
+            print(f"   ~{per_page_kb:.0f} KB/page")
+        # Project a weekly (x4/month) cadence across common residential price
+        # points so the operator can pick a plan. content-length misses chunked
+        # responses, so treat this as a floor, not an exact bill.
+        monthly_gb = (self.total_bytes * 4) / (1024 ** 3)
+        print(
+            f"   Projected monthly (weekly re-crawl, ~this size): "
+            f"{monthly_gb:.2f} GB"
+        )
+        for label, price in (("PacketStream ~$1/GB", 1.0),
+                             ("IPRoyal ~$3.5/GB", 3.5),
+                             ("IPRoyal entry ~$7/GB", 7.0)):
+            print(f"     {label}: ~${monthly_gb * price:.2f}/mo")
+        print(
+            "   (Content-Length only — chunked responses aren't counted, so "
+            "real usage runs somewhat higher.)\n"
+        )
+
+
 async def crawl(config: CrawlerConfig = None):
     """
     Crawl websites based on provided configuration, process content,
@@ -221,7 +300,19 @@ async def crawl(config: CrawlerConfig = None):
             print(f"   ⚠️  Proxy probe failed — the proxy may be down or "
                   f"misconfigured; the crawl will likely still be blocked.")
 
+    bandwidth = _BandwidthTracker()
+
     async with AsyncWebCrawler(config=browser_config) as crawler:
+        # Block image/media/font requests (bandwidth) and tally response bytes
+        # so the crawl can report its per-GB proxy cost. Set on the strategy
+        # after the crawler exists; the hook fires for every page context.
+        crawler.crawler_strategy.set_hook(
+            "on_page_context_created",
+            bandwidth.make_context_hook(config.block_media),
+        )
+        if config.block_media:
+            print("🪶 Media blocking ON — images/media/fonts won't be downloaded.")
+
         # If no specific start URLs are provided, use a default
         if not config.start_urls:
             raise ValueError("No start URLs provided in configuration")
@@ -463,6 +554,8 @@ async def crawl(config: CrawlerConfig = None):
             continue
 
     print(f"✅ Crawling complete! Processed {len(final_results)} unique pages")
+
+    bandwidth.report(len(final_results))
 
     return final_results  # Return the processed results
 

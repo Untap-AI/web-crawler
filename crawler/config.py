@@ -139,6 +139,13 @@ class CrawlerConfig:
     proxy_server: str = ""
     proxy_username: str = ""
     proxy_password: str = ""
+    # Block image/media/font network requests during the deep crawl. The RAG
+    # index only needs text, and rendered product pages pull megabytes of
+    # images — the dominant cost on a per-GB residential proxy. Blocking them
+    # at the network level cuts bandwidth ~5-10x. (Only the deep crawl; the
+    # shallow brand scrape needs images for logo detection, so it never sets
+    # this.) Disable via BLOCK_MEDIA=false if a site hides text behind media.
+    block_media: bool = True
 
     # Output directories
     output_dir: str = "cleaned_output"
@@ -304,6 +311,13 @@ class CrawlerConfig:
 
         if "PROXY_PASSWORD" in os.environ:
             config.proxy_password = os.environ["PROXY_PASSWORD"]
+
+        if "BLOCK_MEDIA" in os.environ:
+            config.block_media = os.environ["BLOCK_MEDIA"].lower() in [
+                "true",
+                "1",
+                "yes",
+            ]
 
         if "HEADLESS" in os.environ:
             config.headless = os.environ["HEADLESS"].lower() in ["true", "1", "yes"]
