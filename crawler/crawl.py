@@ -418,12 +418,13 @@ async def crawl(config: CrawlerConfig = None):
         # even though that phase itself was correctly bounded to max_pages.
         # Cap here too so content-fetch work stays within the same budget.
         batch_size = config.batch_size
-        url_list = list(unique_links)[: config.max_pages]
-        if len(unique_links) > config.max_pages:
+        url_list = list(unique_links)
+        if len(url_list) > config.max_pages:
             print(
                 f"Capping content crawl to {config.max_pages} of "
-                f"{len(unique_links)} unique links found (MAX_PAGES)"
+                f"{len(url_list)} unique links found (MAX_PAGES)"
             )
+            url_list = url_list[: int(config.max_pages)]
         total_batches = (len(url_list) + batch_size - 1) // batch_size
 
         print(f"Processing URLs in {total_batches} batches of {batch_size}")
