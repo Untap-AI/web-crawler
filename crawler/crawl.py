@@ -18,6 +18,119 @@ from crawler.config import CrawlerConfig
 from crawler.custom_markdown import create_custom_markdown_generator
 
 
+def build_proxy_config(config):
+    """Build a crawl4ai proxy_config dict from CrawlerConfig, or None.
+
+    Returns None when no PROXY_SERVER is set so the crawler connects directly.
+    Username/password are attached only when provided (open proxies need none).
+    """
+    if not getattr(config, "proxy_server", ""):
+        return None
+    proxy = {"server": config.proxy_server}
+    if getattr(config, "proxy_username", ""):
+        proxy["username"] = config.proxy_username
+    if getattr(config, "proxy_password", ""):
+        proxy["password"] = config.proxy_password
+    return proxy
+
+
+def _proxy_url(config):
+    """Build a requests-style proxy URL (auth embedded) for the IP probe.
+
+    crawl4ai takes server/username/password as separate fields, but the
+    ``requests`` library wants them inside the URL: scheme://user:pass@host:port.
+    """
+    server = config.proxy_server
+    scheme, sep, rest = server.partition("://")
+    if not sep:  # no scheme in the server string; default to http
+        scheme, rest = "http", server
+    user = getattr(config, "proxy_username", "")
+    pwd = getattr(config, "proxy_password", "")
+    if user:
+        auth = f"{user}:{pwd}@" if pwd else f"{user}@"
+        return f"{scheme}://{auth}{rest}"
+    return f"{scheme}://{rest}"
+
+
+# Resource types worth blocking on a text-only crawl. Images/media are the bulk
+# of a rendered ecommerce page's bytes; fonts are pure decoration for our
+# purposes. Stylesheets/scripts are kept — some sites need JS to render content
+# and to clear the anti-bot challenge.
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+
+
+class _BandwidthTracker:
+    """Accumulates approximate over-the-wire bytes so a crawl can report what it
+    will cost on a per-GB residential proxy. Counts Content-Length on responses
+    that were actually fetched; blocked requests never produce a response, so
+    they correctly contribute zero."""
+
+    def __init__(self):
+        self.total_bytes = 0
+        self.blocked_requests = 0
+
+    def make_context_hook(self, block_media):
+        async def on_page_context_created(context, page=None, **kwargs):
+            if block_media:
+                async def _route(route):
+                    try:
+                        if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
+                            self.blocked_requests += 1
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    except Exception:
+                        # Never let a routing error abort the whole page.
+                        try:
+                            await route.continue_()
+                        except Exception:
+                            pass
+
+                await context.route("**/*", _route)
+
+            def _on_response(response):
+                try:
+                    cl = response.headers.get("content-length")
+                    if cl and cl.isdigit():
+                        self.total_bytes += int(cl)
+                except Exception:
+                    pass
+
+            if page is not None:
+                page.on("response", _on_response)
+
+        return on_page_context_created
+
+    def report(self, page_count):
+        """Print a bandwidth + projected-cost summary for the run."""
+        mb = self.total_bytes / (1024 * 1024)
+        print("\n📊 Bandwidth this crawl:")
+        print(
+            f"   {mb:.1f} MB across {page_count} page(s)"
+            + (f", {self.blocked_requests} image/media/font requests blocked"
+               if self.blocked_requests else "")
+        )
+        if page_count > 0:
+            per_page_kb = (self.total_bytes / page_count) / 1024
+            print(f"   ~{per_page_kb:.0f} KB/page")
+        # Project a weekly (x4/month) cadence across common residential price
+        # points so the operator can pick a plan. content-length misses chunked
+        # responses, so treat this as a floor, not an exact bill.
+        monthly_gb = (self.total_bytes * 4) / (1024 ** 3)
+        print(
+            f"   Projected monthly (weekly re-crawl, ~this size): "
+            f"{monthly_gb:.2f} GB"
+        )
+        for label, price in (("PacketStream ~$1/GB", 1.0),
+                             ("IPRoyal ~$3.5/GB", 3.5),
+                             ("IPRoyal entry ~$7/GB", 7.0)):
+            print(f"     {label}: ~${monthly_gb * price:.2f}/mo")
+        print(
+            "   (Content-Length only — chunked responses aren't counted, so "
+            "real usage runs somewhat higher.)\n"
+        )
+
+
 async def crawl(config: CrawlerConfig = None):
     """
     Crawl websites based on provided configuration, process content,
@@ -144,6 +257,7 @@ async def crawl(config: CrawlerConfig = None):
     unique_links = set()
     all_results = []
 
+    proxy_config = build_proxy_config(config)
     browser_config = BrowserConfig(
         browser_type=config.browser_type,
         chrome_channel=config.browser_channel,
@@ -153,6 +267,7 @@ async def crawl(config: CrawlerConfig = None):
         text_mode=config.text_mode,
         ignore_https_errors=config.ignore_https_errors,
         user_agent=config.user_agent,
+        proxy_config=proxy_config,
     )
     # crawl4ai 0.6.x defaults chrome_channel="chromium" which Playwright
     # treats as a channel lookup and falls back to system Chrome. Clear it
@@ -161,16 +276,43 @@ async def crawl(config: CrawlerConfig = None):
 
     start_urls = config.start_urls
 
-    # Check outbound IP address for debugging
+    # Check outbound IP address for debugging. When a proxy is configured,
+    # route this probe through it too, so the logged IP is the one the target
+    # site actually sees — a direct probe would report the datacenter IP even
+    # though the browser is proxied, which is misleading.
+    if proxy_config:
+        print(f"🛡️  Proxy enabled: {proxy_config['server']}")
+        ip_probe_proxies = {"http": _proxy_url(config), "https": _proxy_url(config)}
+    else:
+        print("🛡️  No proxy configured — crawling from the direct outbound IP.")
+        ip_probe_proxies = None
     try:
-        ip_response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        ip_response = requests.get(
+            'https://api.ipify.org?format=json', timeout=10, proxies=ip_probe_proxies
+        )
         current_ip = ip_response.json().get('ip', 'Unknown')
-        print(f"🌐 Current outbound IP address: {current_ip}")
+        label = "outbound IP via proxy" if proxy_config else "Current outbound IP address"
+        print(f"🌐 {label}: {current_ip}")
         print(f"   Make sure this IP is whitelisted on the target site!")
     except Exception as e:
         print(f"⚠️  Could not determine outbound IP: {e}")
+        if proxy_config:
+            print(f"   ⚠️  Proxy probe failed — the proxy may be down or "
+                  f"misconfigured; the crawl will likely still be blocked.")
+
+    bandwidth = _BandwidthTracker()
 
     async with AsyncWebCrawler(config=browser_config) as crawler:
+        # Block image/media/font requests (bandwidth) and tally response bytes
+        # so the crawl can report its per-GB proxy cost. Set on the strategy
+        # after the crawler exists; the hook fires for every page context.
+        crawler.crawler_strategy.set_hook(
+            "on_page_context_created",
+            bandwidth.make_context_hook(config.block_media),
+        )
+        if config.block_media:
+            print("🪶 Media blocking ON — images/media/fonts won't be downloaded.")
+
         # If no specific start URLs are provided, use a default
         if not config.start_urls:
             raise ValueError("No start URLs provided in configuration")
@@ -315,11 +457,27 @@ async def crawl(config: CrawlerConfig = None):
     # page with a 403/202 after the JS challenge clears — keep those, but still
     # reject genuine block/challenge pages.
     valid_pages = []
+    dropped_block_urls = []
     for res in all_results:
         status = getattr(res, "status_code", None)
         if status is None:
             continue
         if 200 <= status <= 301:
+            # Bot walls often serve their challenge page with a 200 (seen on
+            # gefonline-sales.com), so a passing status alone doesn't mean the
+            # content is real — without this check the interstitial would get
+            # chunked and embedded as if it were the page. Require both
+            # signals (challenge phrase + small body) before dropping, so a
+            # real page that merely mentions a marker phrase is spared.
+            html = getattr(res, "html", "") or ""
+            if is_block_page(html) and len(html) < MIN_REAL_CONTENT_BYTES:
+                url = getattr(res, "url", "?")
+                dropped_block_urls.append(url)
+                print(
+                    f"🚫 Dropping challenge/block page served with status "
+                    f"{status}: {url} ({len(html)} bytes)"
+                )
+                continue
             valid_pages.append(res)
         elif has_real_content(res):
             print(
@@ -327,6 +485,15 @@ async def crawl(config: CrawlerConfig = None):
                 f"real content detected (anti-bot WAF likely)"
             )
             valid_pages.append(res)
+    if dropped_block_urls:
+        print(
+            f"\n🚫 {len(dropped_block_urls)} page(s) were bot-challenge "
+            f"interstitials and were NOT indexed. The crawler is being "
+            f"blocked on these URLs:"
+        )
+        for url in dropped_block_urls:
+            print(f"   {url}")
+        print()
     print(f"Debug: After status filtering: {len(valid_pages)} valid pages")
 
     print("Post-processing results to remove links...")
@@ -388,6 +555,8 @@ async def crawl(config: CrawlerConfig = None):
 
     print(f"✅ Crawling complete! Processed {len(final_results)} unique pages")
 
+    bandwidth.report(len(final_results))
+
     return final_results  # Return the processed results
 
 
@@ -401,6 +570,13 @@ BLOCK_PAGE_MARKERS = [
     "access denied",
     "you have been blocked",
     "ddos protection",
+    "verify you are human",
+    # Challenge walls that come back with a 200 status (seen on
+    # gefonline-sales.com): the page IS the interstitial, so these phrases
+    # never appear as incidental script references on a real page.
+    "you might be a robot",
+    "prove you're a human",
+    "complete the captcha",
 ]
 
 # Minimum HTML size for a non-2xx page to be treated as real content rather
@@ -450,18 +626,11 @@ def check_captcha_indicators(result, url):
     # actual blocks). We only warn on a real block *symptom*:
     #
     #   1. a challenge-wall phrase — copy that only renders when the page IS the
-    #      interstitial, never as an incidental script reference, or
+    #      interstitial, never as an incidental script reference (the shared
+    #      BLOCK_PAGE_MARKERS list, same one the status filter drops on), or
     #   2. a blocking HTTP status (403/429/503), or
     #   3. a suspiciously empty body on a 200 (the classic stripped block page).
-    block_phrases = [
-        "verify you are human",
-        "checking your browser",
-        "just a moment",
-        "ddos protection",
-        "access denied",
-        "attention required",  # Cloudflare block-page title
-    ]
-    found_phrases = [p for p in block_phrases if p in html_lower]
+    found_phrases = [p for p in BLOCK_PAGE_MARKERS if p in html_lower]
     is_error_status = status_code in (403, 429, 503)
     is_tiny = len(html) < 5000 and status_code == 200
 
