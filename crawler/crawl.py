@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import sys
 import requests
 from urllib.parse import urlparse, urlunparse
@@ -11,6 +12,7 @@ from crawl4ai import (
     LLMConfig,
     DefaultMarkdownGenerator,
 )
+from crawl4ai.async_configs import ProxyConfig
 from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
 from crawler.sanitize_filename import sanitize_filename
 from crawler.clean_markdown import process_markdown_results
@@ -19,19 +21,25 @@ from crawler.custom_markdown import create_custom_markdown_generator
 
 
 def build_proxy_config(config):
-    """Build a crawl4ai proxy_config dict from CrawlerConfig, or None.
+    """Build a crawl4ai ProxyConfig from CrawlerConfig, or None.
 
     Returns None when no PROXY_SERVER is set so the crawler connects directly.
     Username/password are attached only when provided (open proxies need none).
+
+    Must be a ProxyConfig object, NOT a dict: BrowserConfig accepts a dict
+    without complaint but stores it as-is, and browser_manager then reads
+    ``proxy_config.username`` — attribute access a dict can't answer. The
+    AttributeError surfaces as a browser that never launches, i.e. every page
+    coming back with status None and no HTML, which reads like a bot block
+    rather than a config bug.
     """
     if not getattr(config, "proxy_server", ""):
         return None
-    proxy = {"server": config.proxy_server}
-    if getattr(config, "proxy_username", ""):
-        proxy["username"] = config.proxy_username
-    if getattr(config, "proxy_password", ""):
-        proxy["password"] = config.proxy_password
-    return proxy
+    return ProxyConfig(
+        server=config.proxy_server,
+        username=getattr(config, "proxy_username", "") or None,
+        password=getattr(config, "proxy_password", "") or None,
+    )
 
 
 def _proxy_url(config):
@@ -70,8 +78,14 @@ class _BandwidthTracker:
         self.blocked_requests = 0
 
     def make_context_hook(self, block_media):
-        async def on_page_context_created(context, page=None, **kwargs):
-            if block_media:
+        # crawl4ai invokes this as hook(page, context=context, config=config) —
+        # page positional, context by keyword. Naming the first parameter
+        # anything but `page` makes Python bind the positional page to it and
+        # then collide with the context keyword ("got multiple values for
+        # argument 'context'"). execute_hook doesn't catch that, so the page
+        # context dies and every URL comes back with status None and no HTML.
+        async def on_page_context_created(page, context=None, **kwargs):
+            if block_media and context is not None:
                 async def _route(route):
                     try:
                         if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
@@ -281,7 +295,7 @@ async def crawl(config: CrawlerConfig = None):
     # site actually sees — a direct probe would report the datacenter IP even
     # though the browser is proxied, which is misleading.
     if proxy_config:
-        print(f"🛡️  Proxy enabled: {proxy_config['server']}")
+        print(f"🛡️  Proxy enabled: {proxy_config.server}")
         ip_probe_proxies = {"http": _proxy_url(config), "https": _proxy_url(config)}
     else:
         print("🛡️  No proxy configured — crawling from the direct outbound IP.")
@@ -470,7 +484,7 @@ async def crawl(config: CrawlerConfig = None):
             # signals (challenge phrase + small body) before dropping, so a
             # real page that merely mentions a marker phrase is spared.
             html = getattr(res, "html", "") or ""
-            if is_block_page(html) and len(html) < MIN_REAL_CONTENT_BYTES:
+            if is_block_page(html) and visible_text_length(html) < MIN_REAL_TEXT_CHARS:
                 url = getattr(res, "url", "?")
                 dropped_block_urls.append(url)
                 print(
@@ -577,12 +591,30 @@ BLOCK_PAGE_MARKERS = [
     "you might be a robot",
     "prove you're a human",
     "complete the captcha",
+    "403 - forbidden",
 ]
 
-# Minimum HTML size for a non-2xx page to be treated as real content rather
-# than a block page. The SiteGround challenge screen is ~12KB; real pages are
-# much larger.
-MIN_REAL_CONTENT_BYTES = 20000
+# Minimum amount of human-readable text for a page to count as real content.
+# Deliberately measured on text, not raw HTML: a WAF block page can be huge and
+# still say nothing. SiteGround's 403 wall is ~80KB of inline CSS and decorative
+# SVG wrapped around 65 characters ("Access to this page is forbidden.") — a
+# raw-byte threshold waves it straight through into the index.
+MIN_REAL_TEXT_CHARS = 500
+
+_NON_TEXT_TAGS_RE = re.compile(r"(?is)<(script|style|svg|noscript|template)\b.*?</\1>")
+_HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
+_HTML_TAG_RE = re.compile(r"(?s)<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def visible_text_length(html):
+    """Length of the human-readable text in ``html``, ignoring markup and assets."""
+    if not html:
+        return 0
+    text = _NON_TEXT_TAGS_RE.sub(" ", html)
+    text = _HTML_COMMENT_RE.sub(" ", text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    return len(_WHITESPACE_RE.sub(" ", text).strip())
 
 
 def is_block_page(html):
@@ -598,7 +630,7 @@ def has_real_content(result):
     (e.g. 403/202) after a JS challenge has cleared.
     """
     html = getattr(result, "html", "") or ""
-    return len(html) >= MIN_REAL_CONTENT_BYTES and not is_block_page(html)
+    return visible_text_length(html) >= MIN_REAL_TEXT_CHARS and not is_block_page(html)
 
 
 def check_captcha_indicators(result, url):
@@ -611,11 +643,17 @@ def check_captcha_indicators(result, url):
     """
     html = result.html if hasattr(result, 'html') and result.html else ""
     status_code = getattr(result, 'status_code', None)
-    
+
     if not html:
+        # crawl4ai swallows launch/navigation exceptions into a failed result,
+        # so error_message is the only place a browser-level fault (bad proxy,
+        # DNS, TLS) is visible — without it every such fault looks like a block.
+        error = getattr(result, 'error_message', None)
         print(f"⚠️  No HTML content for {url} (Status: {status_code})")
+        if error:
+            print(f"   ↳ crawl4ai error: {error}")
         return
-    
+
     html_lower = html.lower()
 
     # A page that merely *references* a captcha library is not blocked. Modern
