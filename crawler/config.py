@@ -23,9 +23,13 @@ class CrawlerConfig:
     # Crawling parameters
     start_urls: List[str] = field(default_factory=list)
     max_depth: int = 3
-    # Hard ceiling on pages visited by the deep crawl. max_depth alone is not a
-    # bound — depth 1 on a site with a 400-link footer is a 400-page crawl.
-    max_pages: int = 100
+    # Optional ceiling on pages visited by the deep crawl. Unlimited by default:
+    # a cap silently truncates the index, and a half-indexed catalog answers
+    # "not found" for anything past the cutoff, which is indistinguishable from
+    # a crawl failure. Set MAX_PAGES to bound a site that's too big to index
+    # whole. (max_depth alone is not a bound — depth 1 on a site with a 400-link
+    # footer is a 400-page crawl.)
+    max_pages: float = float("inf")
     # Concurrent subpage fetches within one shared browser (all batches reuse
     # the same AsyncWebCrawler). Bottleneck per page is mostly LLM/network
     # wait, not local CPU, so this can run higher than it looks.
