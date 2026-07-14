@@ -315,11 +315,27 @@ async def crawl(config: CrawlerConfig = None):
     # page with a 403/202 after the JS challenge clears — keep those, but still
     # reject genuine block/challenge pages.
     valid_pages = []
+    dropped_block_urls = []
     for res in all_results:
         status = getattr(res, "status_code", None)
         if status is None:
             continue
         if 200 <= status <= 301:
+            # Bot walls often serve their challenge page with a 200 (seen on
+            # gefonline-sales.com), so a passing status alone doesn't mean the
+            # content is real — without this check the interstitial would get
+            # chunked and embedded as if it were the page. Require both
+            # signals (challenge phrase + small body) before dropping, so a
+            # real page that merely mentions a marker phrase is spared.
+            html = getattr(res, "html", "") or ""
+            if is_block_page(html) and len(html) < MIN_REAL_CONTENT_BYTES:
+                url = getattr(res, "url", "?")
+                dropped_block_urls.append(url)
+                print(
+                    f"🚫 Dropping challenge/block page served with status "
+                    f"{status}: {url} ({len(html)} bytes)"
+                )
+                continue
             valid_pages.append(res)
         elif has_real_content(res):
             print(
@@ -327,6 +343,15 @@ async def crawl(config: CrawlerConfig = None):
                 f"real content detected (anti-bot WAF likely)"
             )
             valid_pages.append(res)
+    if dropped_block_urls:
+        print(
+            f"\n🚫 {len(dropped_block_urls)} page(s) were bot-challenge "
+            f"interstitials and were NOT indexed. The crawler is being "
+            f"blocked on these URLs:"
+        )
+        for url in dropped_block_urls:
+            print(f"   {url}")
+        print()
     print(f"Debug: After status filtering: {len(valid_pages)} valid pages")
 
     print("Post-processing results to remove links...")
@@ -401,6 +426,13 @@ BLOCK_PAGE_MARKERS = [
     "access denied",
     "you have been blocked",
     "ddos protection",
+    "verify you are human",
+    # Challenge walls that come back with a 200 status (seen on
+    # gefonline-sales.com): the page IS the interstitial, so these phrases
+    # never appear as incidental script references on a real page.
+    "you might be a robot",
+    "prove you're a human",
+    "complete the captcha",
 ]
 
 # Minimum HTML size for a non-2xx page to be treated as real content rather
@@ -450,18 +482,11 @@ def check_captcha_indicators(result, url):
     # actual blocks). We only warn on a real block *symptom*:
     #
     #   1. a challenge-wall phrase — copy that only renders when the page IS the
-    #      interstitial, never as an incidental script reference, or
+    #      interstitial, never as an incidental script reference (the shared
+    #      BLOCK_PAGE_MARKERS list, same one the status filter drops on), or
     #   2. a blocking HTTP status (403/429/503), or
     #   3. a suspiciously empty body on a 200 (the classic stripped block page).
-    block_phrases = [
-        "verify you are human",
-        "checking your browser",
-        "just a moment",
-        "ddos protection",
-        "access denied",
-        "attention required",  # Cloudflare block-page title
-    ]
-    found_phrases = [p for p in block_phrases if p in html_lower]
+    found_phrases = [p for p in BLOCK_PAGE_MARKERS if p in html_lower]
     is_error_status = status_code in (403, 429, 503)
     is_tiny = len(html) < 5000 and status_code == 200
 
