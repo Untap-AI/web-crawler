@@ -130,6 +130,15 @@ class CrawlerConfig:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
     )
+    # Outbound proxy. The browser fingerprint is already heavily disguised
+    # (magic / simulate_user / override_navigator / real UA), so the remaining
+    # tell is IP reputation: crawling from a datacenter IP (e.g. Render) gets
+    # flagged by WooCommerce/WAF bot walls no matter how convincing the browser
+    # looks. Point PROXY_SERVER at a residential/rotating proxy to crawl from a
+    # real-looking IP. Empty (default) = direct connection, no proxy.
+    proxy_server: str = ""
+    proxy_username: str = ""
+    proxy_password: str = ""
 
     # Output directories
     output_dir: str = "cleaned_output"
@@ -286,6 +295,15 @@ class CrawlerConfig:
 
         if "USER_AGENT" in os.environ:
             config.user_agent = os.environ["USER_AGENT"]
+
+        if "PROXY_SERVER" in os.environ:
+            config.proxy_server = os.environ["PROXY_SERVER"]
+
+        if "PROXY_USERNAME" in os.environ:
+            config.proxy_username = os.environ["PROXY_USERNAME"]
+
+        if "PROXY_PASSWORD" in os.environ:
+            config.proxy_password = os.environ["PROXY_PASSWORD"]
 
         if "HEADLESS" in os.environ:
             config.headless = os.environ["HEADLESS"].lower() in ["true", "1", "yes"]

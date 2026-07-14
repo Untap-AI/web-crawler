@@ -160,6 +160,8 @@ def _select_links(root_result, start_url: str, limit: int) -> list:
 
 
 def _build_browser_config(config: CrawlerConfig) -> BrowserConfig:
+    from crawler.crawl import build_proxy_config
+
     browser_config = BrowserConfig(
         browser_type=config.browser_type,
         chrome_channel=config.browser_channel,
@@ -169,6 +171,9 @@ def _build_browser_config(config: CrawlerConfig) -> BrowserConfig:
         text_mode=config.text_mode,
         ignore_https_errors=config.ignore_https_errors,
         user_agent=config.user_agent,
+        # Same IP-reputation reasoning as the deep crawl — route the shallow
+        # brand/demo scrape through the proxy when one is configured.
+        proxy_config=build_proxy_config(config),
         # crawl4ai's default (1080x600) is barely taller than a nav bar — most
         # homepages render their real UI chrome (buttons, footer) below that,
         # and a short viewport also under-triggers scroll-based lazy loading.

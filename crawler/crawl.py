@@ -18,6 +18,40 @@ from crawler.config import CrawlerConfig
 from crawler.custom_markdown import create_custom_markdown_generator
 
 
+def build_proxy_config(config):
+    """Build a crawl4ai proxy_config dict from CrawlerConfig, or None.
+
+    Returns None when no PROXY_SERVER is set so the crawler connects directly.
+    Username/password are attached only when provided (open proxies need none).
+    """
+    if not getattr(config, "proxy_server", ""):
+        return None
+    proxy = {"server": config.proxy_server}
+    if getattr(config, "proxy_username", ""):
+        proxy["username"] = config.proxy_username
+    if getattr(config, "proxy_password", ""):
+        proxy["password"] = config.proxy_password
+    return proxy
+
+
+def _proxy_url(config):
+    """Build a requests-style proxy URL (auth embedded) for the IP probe.
+
+    crawl4ai takes server/username/password as separate fields, but the
+    ``requests`` library wants them inside the URL: scheme://user:pass@host:port.
+    """
+    server = config.proxy_server
+    scheme, sep, rest = server.partition("://")
+    if not sep:  # no scheme in the server string; default to http
+        scheme, rest = "http", server
+    user = getattr(config, "proxy_username", "")
+    pwd = getattr(config, "proxy_password", "")
+    if user:
+        auth = f"{user}:{pwd}@" if pwd else f"{user}@"
+        return f"{scheme}://{auth}{rest}"
+    return f"{scheme}://{rest}"
+
+
 async def crawl(config: CrawlerConfig = None):
     """
     Crawl websites based on provided configuration, process content,
@@ -144,6 +178,7 @@ async def crawl(config: CrawlerConfig = None):
     unique_links = set()
     all_results = []
 
+    proxy_config = build_proxy_config(config)
     browser_config = BrowserConfig(
         browser_type=config.browser_type,
         chrome_channel=config.browser_channel,
@@ -153,6 +188,7 @@ async def crawl(config: CrawlerConfig = None):
         text_mode=config.text_mode,
         ignore_https_errors=config.ignore_https_errors,
         user_agent=config.user_agent,
+        proxy_config=proxy_config,
     )
     # crawl4ai 0.6.x defaults chrome_channel="chromium" which Playwright
     # treats as a channel lookup and falls back to system Chrome. Clear it
@@ -161,14 +197,29 @@ async def crawl(config: CrawlerConfig = None):
 
     start_urls = config.start_urls
 
-    # Check outbound IP address for debugging
+    # Check outbound IP address for debugging. When a proxy is configured,
+    # route this probe through it too, so the logged IP is the one the target
+    # site actually sees — a direct probe would report the datacenter IP even
+    # though the browser is proxied, which is misleading.
+    if proxy_config:
+        print(f"🛡️  Proxy enabled: {proxy_config['server']}")
+        ip_probe_proxies = {"http": _proxy_url(config), "https": _proxy_url(config)}
+    else:
+        print("🛡️  No proxy configured — crawling from the direct outbound IP.")
+        ip_probe_proxies = None
     try:
-        ip_response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        ip_response = requests.get(
+            'https://api.ipify.org?format=json', timeout=10, proxies=ip_probe_proxies
+        )
         current_ip = ip_response.json().get('ip', 'Unknown')
-        print(f"🌐 Current outbound IP address: {current_ip}")
+        label = "outbound IP via proxy" if proxy_config else "Current outbound IP address"
+        print(f"🌐 {label}: {current_ip}")
         print(f"   Make sure this IP is whitelisted on the target site!")
     except Exception as e:
         print(f"⚠️  Could not determine outbound IP: {e}")
+        if proxy_config:
+            print(f"   ⚠️  Proxy probe failed — the proxy may be down or "
+                  f"misconfigured; the crawl will likely still be blocked.")
 
     async with AsyncWebCrawler(config=browser_config) as crawler:
         # If no specific start URLs are provided, use a default
